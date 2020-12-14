@@ -1,59 +1,65 @@
-This is a solution to the Certified Kubernetes Administrator Practice Test for Backup and Restore of ETCD Clust within a Kubernetes set up with kubeadm
 
-## 1. Get etcdctl utility if it's not already present.
 
-go get github.com/coreos/etcd/etcdctl
+# 1. Get etcdctl utility if it's not already present.
 
-## 2. Backup
+Reference: https://github.com/etcd-io/etcd/releases
+
+```
+ETCD_VER=v3.4.9
+
+# choose either URL
+GOOGLE_URL=https://storage.googleapis.com/etcd
+GITHUB_URL=https://github.com/etcd-io/etcd/releases/download
+DOWNLOAD_URL=${GOOGLE_URL}
+
+rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+rm -rf /tmp/etcd-download-test && mkdir -p /tmp/etcd-download-test
+
+curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download-test --strip-components=1
+rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+
+/tmp/etcd-download-test/etcd --version
+ETCDCTL_API=3 /tmp/etcd-download-test/etcdctl version
+
+mv /tmp/etcd-download-test/etcdctl /usr/bin
+```
+
+# 2. Backup
 
 ```
 ETCDCTL_API=3 etcdctl --endpoints=https://[127.0.0.1]:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
      --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
-     snapshot save /tmp/snapshot-pre-boot.db
+     snapshot save /opt/snapshot-pre-boot.db
 ```
+
+Note: In this case, the **ETCD** is running on the same server where we are running the commands (which is the *controlplane* node). As a result, the **--endpoint **argument is optional and can be ignored. 
+
+The options **--cert, --cacert and --key** are mandatory to authenticate to the ETCD server to take the backup.
+
+If you want to take a backup of the ETCD service running on a different machine, you will have to provide the correct endpoint to that server (which is the IP Address and port of the etcd server with the **--endpoint **argument)
 
 # -----------------------------
 # Disaster Happens
 # -----------------------------
 
-## 3. Restore ETCD Snapshot to a new folder
-
-
-```
-ETCDCTL_API=3 etcdctl --endpoints=https://[127.0.0.1]:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-     --name=master \
-     --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
-     --data-dir /var/lib/etcd-from-backup \
-     --initial-cluster=master=https://127.0.0.1:2380 \
-     --initial-cluster-token etcd-cluster-1 \
-     --initial-advertise-peer-urls=https://127.0.0.1:2380 \
-     snapshot restore /tmp/snapshot-pre-boot.db
-```
-
-## 4. Modify /etc/kubernetes/manifests/etcd.yaml
-
-Update --data-dir to use new target location
+# 3. Restore ETCD Snapshot to a new folder
 
 ```
---data-dir=/var/lib/etcd-from-backup
+ETCDCTL_API=3 etcdctl  --data-dir /var/lib/etcd-from-backup \
+     snapshot restore /opt/snapshot-pre-boot.db
 ```
 
-Update new initial-cluster-token to specify new cluster
+Note: In this case, we are restoring the snapshot to a different directory but in the same server where we took the backup (**the controlplane node)**
+As a result, the only required option for the restore command is the **--data-dir**.  
+# 4. Modify /etc/kubernetes/manifests/etcd.yaml
 
-```
---initial-cluster-token=etcd-cluster-1
-```
+Update ETCD POD to use the new hostPath directory `/var/lib/etcd-from-backup` by modifying the pod definition file at `/etc/kubernetes/manifests/etcd.yaml`. When this file is updated, the ETCD pod is automatically re-created as this is a static pod placed under the `/etc/kubernetes/manifests` directory.
+
 
 Update volumes and volume mounts to point to new path
 
 ```
-    volumeMounts:
-    - mountPath: /var/lib/etcd-from-backup
-      name: etcd-data
-    - mountPath: /etc/kubernetes/pki/etcd
-      name: etcd-certs
-  hostNetwork: true
-  priorityClassName: system-cluster-critical
   volumes:
   - hostPath:
       path: /var/lib/etcd-from-backup
@@ -65,4 +71,6 @@ Update volumes and volume mounts to point to new path
     name: etcd-certs
 ```
 
-After the manifest files are modified ETCD cluster should automatically restart
+> Note: as the ETCD pod has changed it will automatically restart, and also kube-controller-manager and kube-scheduler. Wait 1-2 to mins for this pods to restart. You can make a `watch "docker ps | grep etcd"` to see when the ETCD pod is restarted.
+
+> Note2: If the etcd pod is not getting `Ready 1/1`, then restart it by `kubectl delete pod -n kube-system etcd-controlplane` and wait 1 minute.
